@@ -9,6 +9,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	api "k8s.io/client-go/tools/clientcmd/api"
 )
 
 type MonitoringTarget struct {
@@ -20,38 +21,34 @@ func main() {
 	home, _ := os.UserHomeDir()
 	kubeconfig := filepath.Join(home, ".kube", "desenvolvimento.yaml")
 
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
-	if err != nil {
-		panic(err)
-	}
-
 	rawConfig, err := clientcmd.LoadFromFile(kubeconfig)
 	if err != nil {
 		panic(err)
 	}
 
-	contextConfig := rawConfig.Contexts[rawConfig.CurrentContext]
-
-	for contextName, contextConfig := range rawConfig.Contexts {
-		fmt.Println("Context:", contextName)
-		fmt.Println("Cluster:", contextConfig.Cluster)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		panic(err)
-	}
 	ctx := context.Background()
 
-	targets, err := findMonitoredIngresses(clientset, ctx, contextConfig.Cluster)
-	if err != nil {
-		panic(err)
-	}
+	var allTargets []MonitoringTarget
 
-	for _, target := range targets {
+	for contextName := range rawConfig.Contexts {
+		clientset, err := clientForContext(rawConfig, contextName)
+		if err != nil {
+			panic(err)
+		}
+
+		cluster := rawConfig.Contexts[contextName].Cluster
+
+		targets, err := findMonitoredIngresses(clientset, ctx, cluster)
+		if err != nil {
+			panic(err)
+		}
+
+		allTargets = append(allTargets, targets...)
+	}
+	 
+	for _, target := range allTargets {
 		fmt.Println(target.Host, target.Cluster)
 	}
-
 }
 func findMonitoredIngresses(clientset *kubernetes.Clientset, ctx context.Context,
 	cluster string) ([]MonitoringTarget, error) {
@@ -62,8 +59,6 @@ func findMonitoredIngresses(clientset *kubernetes.Clientset, ctx context.Context
 
 	var targets []MonitoringTarget
 	
-    
-
 	for _, ingress := range ingresses.Items {
 		if ingress.Spec.IngressClassName == nil {
 			continue
@@ -86,4 +81,22 @@ func findMonitoredIngresses(clientset *kubernetes.Clientset, ctx context.Context
 	}
 
 	return targets, nil
+}
+
+func clientForContext(rawConfig *api.Config,contextName string,) (*kubernetes.Clientset, error) {
+	overrides := &clientcmd.ConfigOverrides{
+		CurrentContext: contextName,
+	}
+
+	configLoader := clientcmd.NewDefaultClientConfig(
+		*rawConfig,
+		overrides,
+	)
+
+	config, err := configLoader.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	return kubernetes.NewForConfig(config)
 }
