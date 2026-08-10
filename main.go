@@ -13,7 +13,7 @@ import (
 
 func main() {
 	home, _ := os.UserHomeDir()
-	kubeconfig := filepath.Join(home, ".kube", "tools.yaml")
+	kubeconfig := filepath.Join(home, ".kube", "desenvolvimento.yaml")
 
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
@@ -24,29 +24,44 @@ func main() {
 		panic(err)
 	}
 	ctx := context.Background()
-	ingresses, err := clientset.NetworkingV1().Ingresses("sonarqube").List(ctx, metav1.ListOptions{})
+
+	hosts, err := findMonitoredIngresses(clientset, ctx)
 	if err != nil {
 		panic(err)
 	}
-    for _, ingress := range ingresses.Items {
-	if ingress.Spec.IngressClassName == nil {
-		continue
+
+	for _, host := range hosts {
+		fmt.Println(host)
 	}
 
-	if *ingress.Spec.IngressClassName != "nginx" {
-		continue
-	}
-	enabled := ingress.Annotations["blackbox-reconciler.jottakayo.io/enabled"]
-
-	if enabled != "true" {
-		continue
+}
+func findMonitoredIngresses(clientset *kubernetes.Clientset, ctx context.Context) ([]string, error) {
+	ingresses, err := clientset.NetworkingV1().Ingresses(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
 	}
 
-	for _, rule := range ingress.Spec.Rules {
-		fmt.Println(rule.Host)
-	}
+
+	var hosts []string
+	
+
+	for _, ingress := range ingresses.Items {
+		if ingress.Spec.IngressClassName == nil {
+			continue
+		}
+
+		if *ingress.Spec.IngressClassName != "nginx" {
+			continue
+		}
+
+		if ingress.Annotations["blackbox-reconciler.go.io/enabled"] != "true" {
+			continue
+		}
+
+		for _, rule := range ingress.Spec.Rules {
+			hosts = append(hosts, rule.Host)
+		}
 	}
 
-	//fmt.Printf("Kubernetes client created: %v\n", clientset != nil)
-  
+	return hosts, nil
 }
