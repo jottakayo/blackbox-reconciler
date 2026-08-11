@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"context"
 	"sort"
-
+    
+	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +20,20 @@ type MonitoringTarget struct {
 	Ingress   string
 	Host      string
 }
+
+type BlackboxTarget struct {
+        Name                      string            `yaml:"name"`
+        URL                       string            `yaml:"url"`
+        Module                    string            `yaml:"module"`
+        Interval                  string            `yaml:"interval"`
+        AdditionalMetricsRelabels map[string]string  `yaml:"additionalMetricsRelabels"`
+  }
+
+type BlackboxConfig struct {
+	ServiceMonitor any              `yaml:"serviceMonitor"`
+	Targets        []BlackboxTarget `yaml:"targets"`
+}
+
 
 func main() {
 	home, _ := os.UserHomeDir()
@@ -34,19 +49,24 @@ func main() {
 
 
 	targets, err := discoverTargets(rawConfig, ctx)
-		if err != nil {
-			panic(err)
-		}
-	 
-	for _, target := range targets {
-		fmt.Printf(
-			"%s/%s/%s → %s\n",
-			target.Cluster,
-			target.Namespace,
-			target.Ingress,
-			target.Host,
-		)
+	if err != nil {
+		panic(err)
 	}
+
+	blackboxTargets := buildBlackboxTargets(targets)
+
+	for _, target := range blackboxTargets {
+		fmt.Printf("%+v\n", target)
+	}
+	config := BlackboxConfig{
+		Targets: blackboxTargets,
+	}
+	data, err := yaml.Marshal(config)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(string(data))
 	
 }
 
@@ -151,4 +171,22 @@ func normalizeTargets(targets []MonitoringTarget) []MonitoringTarget {
 	return targets
 }
 
+func buildBlackboxTargets(targets []MonitoringTarget) []BlackboxTarget {
+	result := make([]BlackboxTarget, 0, len(targets))
 
+	for _, target := range targets {
+		result = append(result, BlackboxTarget{
+			Name:     target.Ingress,
+			URL:      "https://" + target.Host,
+			Module:   "http_2xx",
+			Interval: "60s",
+			AdditionalMetricsRelabels: map[string]string{
+				"cluster":          target.Cluster,
+				"ingressName":      target.Ingress,
+				"ingressNamespace": target.Namespace,
+			},
+		})
+	}
+
+	return result
+}
