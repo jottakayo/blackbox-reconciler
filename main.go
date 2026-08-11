@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"context"
+	"sort"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -13,9 +14,11 @@ import (
 )
 
 type MonitoringTarget struct {
-		Host string
-		Cluster string
-	}
+	Cluster   string
+	Namespace string
+	Ingress   string
+	Host      string
+}
 
 func main() {
 	home, _ := os.UserHomeDir()
@@ -28,28 +31,47 @@ func main() {
 
 	ctx := context.Background()
 
+
+
+	targets, err := discoverTargets(rawConfig, ctx)
+		if err != nil {
+			panic(err)
+		}
+	 
+	for _, target := range targets {
+		fmt.Printf(
+			"%s/%s/%s → %s\n",
+			target.Cluster,
+			target.Namespace,
+			target.Ingress,
+			target.Host,
+		)
+	}
+	
+}
+
+func discoverTargets(rawConfig *api.Config,ctx context.Context,) ([]MonitoringTarget, error) {
 	var allTargets []MonitoringTarget
 
 	for contextName := range rawConfig.Contexts {
 		clientset, err := clientForContext(rawConfig, contextName)
 		if err != nil {
-			panic(err)
+			return nil, err
 		}
 
 		cluster := rawConfig.Contexts[contextName].Cluster
 
 		targets, err := findMonitoredIngresses(clientset, ctx, cluster)
 		if err != nil {
-			panic(err)
+			return nil, err
 		}
 
 		allTargets = append(allTargets, targets...)
 	}
-	 
-	for _, target := range allTargets {
-		fmt.Println(target.Host, target.Cluster)
-	}
+
+	return normalizeTargets(allTargets), nil
 }
+
 func findMonitoredIngresses(clientset *kubernetes.Clientset, ctx context.Context,
 	cluster string) ([]MonitoringTarget, error) {
 	ingresses, err := clientset.NetworkingV1().Ingresses(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
@@ -74,8 +96,10 @@ func findMonitoredIngresses(clientset *kubernetes.Clientset, ctx context.Context
 
 		for _, rule := range ingress.Spec.Rules {
 			targets = append(targets, MonitoringTarget{
-				Cluster: cluster,
-				Host: rule.Host,
+				Cluster:   cluster,
+				Namespace: ingress.Namespace,
+				Ingress:   ingress.Name,
+				Host:      rule.Host,
 			})
 		}
 	}
@@ -100,3 +124,31 @@ func clientForContext(rawConfig *api.Config,contextName string,) (*kubernetes.Cl
 
 	return kubernetes.NewForConfig(config)
 }
+
+func deduplicateTargets(targets []MonitoringTarget) []MonitoringTarget {
+	seen := make(map[string]struct{})
+	result := make([]MonitoringTarget, 0, len(targets))
+
+	for _, target := range targets {
+		if _, exists := seen[target.Host]; exists {
+			continue
+		}
+
+		seen[target.Host] = struct{}{}
+		result = append(result, target)
+	}
+
+	return result
+}
+
+func normalizeTargets(targets []MonitoringTarget) []MonitoringTarget {
+	targets = deduplicateTargets(targets)
+
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].Host < targets[j].Host
+	})
+
+	return targets
+}
+
+
