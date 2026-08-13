@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"context"
 	"sort"
+	"os/exec"
     
 	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/kubernetes"
@@ -30,10 +31,22 @@ type BlackboxTarget struct {
   }
 
 type BlackboxConfig struct {
-	ServiceMonitor any              `yaml:"serviceMonitor"`
+	ServiceMonitor any              `yaml:"serviceMonitor,omitempty"`
 	Targets        []BlackboxTarget `yaml:"targets"`
 }
 
+type CurrentBlackboxConfig struct {
+	ServiceMonitor ServiceMonitorConfig `yaml:"serviceMonitor"`
+}
+
+type ServiceMonitorConfig struct {
+	Targets []BlackboxTarget `yaml:"targets"`
+}
+
+const (
+	defaultBlackboxModule   = "http_2xx"
+	defaultBlackboxInterval = "60s"
+)
 
 func main() {
 	home, _ := os.UserHomeDir()
@@ -65,10 +78,36 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	err = os.WriteFile("desired-values.yaml", data, 0644)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Desired configuration written to desired-values.yaml")
 
 	fmt.Println(string(data))
 	
-}
+
+	values, err := getHelmValues()
+	if err != nil {
+		panic(string(values))
+	}
+
+	currentConfig, err := parseHelmValues(values)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("Current targets: %d\n", len(currentConfig.ServiceMonitor.Targets))
+	
+	currentTargets := currentConfig.ServiceMonitor.Targets
+
+	if targetsEqual(currentTargets, blackboxTargets) {
+		fmt.Println("Targets are already synchronized")
+		return
+	}
+
+	fmt.Println("Targets differ, update required")
+	}
 
 func discoverTargets(rawConfig *api.Config,ctx context.Context,) ([]MonitoringTarget, error) {
 	var allTargets []MonitoringTarget
@@ -145,6 +184,23 @@ func clientForContext(rawConfig *api.Config,contextName string,) (*kubernetes.Cl
 	return kubernetes.NewForConfig(config)
 }
 
+func getHelmValues() ([]byte, error) {
+	cmd := exec.Command(
+		"helm",
+		"get",
+		"values",
+		"prometheus-blackbox-exporter",
+		"-n",
+		"cattle-monitoring-system",
+		"--kube-context",
+		"tools",
+		"--all",
+		"-o",
+		"yaml",
+	)
+
+	return cmd.CombinedOutput()
+}
 func deduplicateTargets(targets []MonitoringTarget) []MonitoringTarget {
 	seen := make(map[string]struct{})
 	result := make([]MonitoringTarget, 0, len(targets))
@@ -178,8 +234,8 @@ func buildBlackboxTargets(targets []MonitoringTarget) []BlackboxTarget {
 		result = append(result, BlackboxTarget{
 			Name:     target.Ingress,
 			URL:      "https://" + target.Host,
-			Module:   "http_2xx",
-			Interval: "60s",
+			Module:   defaultBlackboxModule,
+			Interval: defaultBlackboxInterval,
 			AdditionalMetricsRelabels: map[string]string{
 				"cluster":          target.Cluster,
 				"ingressName":      target.Ingress,
@@ -189,4 +245,41 @@ func buildBlackboxTargets(targets []MonitoringTarget) []BlackboxTarget {
 	}
 
 	return result
+}
+
+func parseHelmValues(data []byte) (CurrentBlackboxConfig, error) {
+	var config CurrentBlackboxConfig
+
+	err := yaml.Unmarshal(data, &config)
+	if err != nil {
+		return config, err
+	}
+
+	return config, nil
+}
+
+func targetsEqual(current, desired []BlackboxTarget) bool {
+	if len(current) != len(desired) {
+		return false
+	}
+
+	for i := range current {
+		if current[i].Name != desired[i].Name {
+			return false
+		}
+
+		if current[i].URL != desired[i].URL {
+			return false
+		}
+
+		if current[i].Module != desired[i].Module {
+			return false
+		}
+
+		if current[i].Interval != desired[i].Interval {
+			return false
+		}
+	}
+
+	return true
 }
