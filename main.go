@@ -15,6 +15,7 @@ import (
 	api "k8s.io/client-go/tools/clientcmd/api"
 )
 
+
 type MonitoringTarget struct {
 	Cluster   string
 	Namespace string
@@ -30,17 +31,14 @@ type BlackboxTarget struct {
         AdditionalMetricsRelabels map[string]string  `yaml:"additionalMetricsRelabels"`
   }
 
-type BlackboxConfig struct {
-	ServiceMonitor any              `yaml:"serviceMonitor,omitempty"`
-	Targets        []BlackboxTarget `yaml:"targets"`
-}
-
 type CurrentBlackboxConfig struct {
 	ServiceMonitor ServiceMonitorConfig `yaml:"serviceMonitor"`
 }
 
 type ServiceMonitorConfig struct {
-	Targets []BlackboxTarget `yaml:"targets"`
+	Enabled    bool             `yaml:"enabled"`
+	SelfMonitor any             `yaml:"selfMonitor"`
+	Targets    []BlackboxTarget `yaml:"targets"`
 }
 
 const (
@@ -56,7 +54,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
 	ctx := context.Background()
 
 
@@ -71,21 +68,6 @@ func main() {
 	for _, target := range blackboxTargets {
 		fmt.Printf("%+v\n", target)
 	}
-	config := BlackboxConfig{
-		Targets: blackboxTargets,
-	}
-	data, err := yaml.Marshal(config)
-	if err != nil {
-		panic(err)
-	}
-	err = os.WriteFile("desired-values.yaml", data, 0644)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("Desired configuration written to desired-values.yaml")
-
-	fmt.Println(string(data))
-	
 
 	values, err := getHelmValues()
 	if err != nil {
@@ -96,18 +78,32 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
-	fmt.Printf("Current targets: %d\n", len(currentConfig.ServiceMonitor.Targets))
 	
 	currentTargets := currentConfig.ServiceMonitor.Targets
+
+	fmt.Printf("Current targets: %d\n", len(currentTargets))
 
 	if targetsEqual(currentTargets, blackboxTargets) {
 		fmt.Println("Targets are already synchronized")
 		return
 	}
 
-	fmt.Println("Targets differ, update required")
+	err = writeTargetValues(blackboxTargets)
+	if err != nil {
+		panic(err)
 	}
+
+	fmt.Println("Reconcile values written")
+
+	output, err := helmUpgradeDryRun()
+	if err != nil {
+		fmt.Println(string(output))
+		panic(err)
+	}
+
+	fmt.Println(string(output))
+
+}
 
 func discoverTargets(rawConfig *api.Config,ctx context.Context,) ([]MonitoringTarget, error) {
 	var allTargets []MonitoringTarget
@@ -194,7 +190,6 @@ func getHelmValues() ([]byte, error) {
 		"cattle-monitoring-system",
 		"--kube-context",
 		"tools",
-		"--all",
 		"-o",
 		"yaml",
 	)
@@ -263,23 +258,60 @@ func targetsEqual(current, desired []BlackboxTarget) bool {
 		return false
 	}
 
-	for i := range current {
-		if current[i].Name != desired[i].Name {
+	currentMap := make(map[string]BlackboxTarget, len(current))
+	for _, target := range current {
+		currentMap[target.Name] = target
+	}
+
+	for _, target := range desired {
+		currentTarget, exists := currentMap[target.Name]
+		if !exists {
 			return false
 		}
 
-		if current[i].URL != desired[i].URL {
-			return false
-		}
-
-		if current[i].Module != desired[i].Module {
-			return false
-		}
-
-		if current[i].Interval != desired[i].Interval {
+		if currentTarget.URL != target.URL ||
+			currentTarget.Module != target.Module ||
+			currentTarget.Interval != target.Interval {
 			return false
 		}
 	}
 
 	return true
+}
+
+func writeTargetValues(targets []BlackboxTarget) error {
+	values := struct {
+		ServiceMonitor struct {
+			Targets []BlackboxTarget `yaml:"targets"`
+		} `yaml:"serviceMonitor"`
+	}{}
+
+	values.ServiceMonitor.Targets = targets
+
+	data, err := yaml.Marshal(values)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile("reconcile-values.yaml", data, 0644)
+}
+
+func helmUpgradeDryRun() ([]byte, error) {
+	cmd := exec.Command(
+		"helm",
+		"upgrade",
+		"prometheus-blackbox-exporter",
+		"prometheus-community/prometheus-blackbox-exporter",
+		"-n",
+		"cattle-monitoring-system",
+		"--version=11.10.0",
+		"--kube-context",
+		"tools",
+		"--reuse-values",
+		"-f",
+		"reconcile-values.yaml",
+		"--dry-run=server",
+	)
+
+	return cmd.CombinedOutput()
 }
